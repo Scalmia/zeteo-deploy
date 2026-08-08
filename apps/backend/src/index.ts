@@ -2,7 +2,6 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import path from 'path';
-import fs from 'fs';
 import { ClientEvent, ServerEvent, Phase, BotContext } from '@zeteo/shared-types';
 import {
   createRoom,
@@ -18,6 +17,7 @@ import { buildGameStateFor } from './view';
 import { setPhaseTimer, clearPhaseTimer } from './timer';
 import { nextPhase } from './stateMachine';
 import { decideBotAction } from './bot';
+import { exportGameLog } from './gamelog';
 
 const app = express();
 const httpServer = createServer(app);
@@ -48,7 +48,7 @@ const DESCRIBE_TURN_DURATION = 20000;
 const WORD_SETS: Record<string, string[]> = {
   동물: ['강아지', '고양이', '기린', '펭귄', '캥거루'],
   음식: ['김치찌개', '떡볶이', '초밥', '파스타', '삼겹살'],
-  가전제품: ['냉장고', '세탁기', '전자레인지', '에어컨', '정수기']
+  가전제품: ['냉장고', '세탁기', '전자레인지', '에어컨', '정수기'],
 };
 
 function pickRandomCategoryAndWord(): { category: string; word: string } {
@@ -87,52 +87,9 @@ function enterPhase(room: RoomInternalState) {
   void maybeTriggerBot(room);
 }
 
-// 팀 피드백: 게임이 끝난 시점(result 진입)에 전체 대화 로그를 터미널에 띄워달라는 요청.
-// 친구들과 테스트할 때나 나중에 대화 흐름을 복기할 때 유용하도록,
-// (1) 서버 콘솔에 한 번에(증분 아님) 출력하고 (2) apps/backend/logs/ 에 md 형식으로도 남긴다.
-// isBot/role은 클라이언트로는 절대 안 나가지만, 이건 서버 터미널/로컬 파일 전용이라
-// 팀이 직접 복기할 때 누가 봇이었는지 바로 보이도록 표시해준다.
-const LOG_DIR = path.join(__dirname, '../logs');
-
-function logTranscript(room: RoomInternalState) {
-  const describe = (id: string): string => {
-    if (id === 'system') return '[시스템]';
-    const p = room.players.find((pl) => pl.id === id);
-    if (!p) return id;
-    return `${p.name}(${p.label}${p.isBot ? ' · 봇' : ''}${p.role === 'liar' ? ' · 라이어' : ''})`;
-  };
-
-  const plainLines = room.messages.map((m) => {
-    const time = new Date(m.at).toLocaleTimeString('ko-KR', { hour12: false });
-    return `[${time}] (${m.phase}) ${describe(m.speakerId)}: ${m.text}`;
-  });
-
-  console.log(`\n===== [${room.roomId}] 대화 로그 (총 ${plainLines.length}건) =====`);
-  for (const line of plainLines) console.log(line);
-  console.log(`===== [${room.roomId}] 로그 끝 =====\n`);
-
-  try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const base = path.join(LOG_DIR, `${room.roomId}_${stamp}`);
-
-    const mdLines = [
-      `# [${room.roomId}] 대화 로그`,
-      '',
-      '| 시간 | 단계 | 발언자 | 내용 |',
-      '|---|---|---|---|',
-      ...room.messages.map((m) => {
-        const time = new Date(m.at).toLocaleTimeString('ko-KR', { hour12: false });
-        return `| ${time} | ${m.phase} | ${describe(m.speakerId)} | ${m.text.replace(/\|/g, '\\|')} |`;
-      }),
-    ];
-    fs.writeFileSync(`${base}.md`, mdLines.join('\n') + '\n', 'utf-8');
-
-    console.log(`[${room.roomId}] 대화 로그 파일 저장: ${base}.md`);
-  } catch (e) {
-    console.error(`[${room.roomId}] 대화 로그 파일 저장 실패:`, e);
-  }
-}
+// 로그 생성·저장·웹훅 전송은 gamelog.ts 가 담당한다.
+// 설문이 result 이후에 도착하므로, 내보내는 시점은 result 진입이 아니라
+// "더 이상 응답이 오지 않는 시점"(전원 제출 또는 마지막 퇴장)이다.
 
 // stateMachine으로 다음 phase 계산 → 필요한 부수효과 처리 → 다음 타이머 설정 → 브로드캐스트
 function advancePhase(room: RoomInternalState) {
@@ -141,10 +98,6 @@ function advancePhase(room: RoomInternalState) {
   if (room.phase === 'describe') {
     room.turnOrder = room.players.map((p) => p.id);
     room.currentTurnIndex = 0;
-  }
-
-  if (room.phase === 'result') {
-    logTranscript(room);
   }
 
   enterPhase(room);
@@ -266,7 +219,12 @@ async function maybeTriggerBot(room: RoomInternalState) {
     category: room.category,
     word: bot.role === 'liar' ? null : room.word,
     selfId: bot.id,
-    players: room.players.map((p) => ({ id: p.id, label: p.label, isAlive: p.isAlive, isReady: room.readyIds.has(p.id) })),
+    players: room.players.map((p) => ({
+      id: p.id,
+      label: p.label,
+      isAlive: p.isAlive,
+      isReady: room.readyIds.has(p.id),
+    })),
     transcript: room.messages,
     voteCounts,
     accusedId: room.accusedId,
@@ -280,7 +238,10 @@ async function maybeTriggerBot(room: RoomInternalState) {
   try {
     action = await decideBotAction(ctx);
   } catch (e) {
-    console.error(`[${room.roomId}] decideBotAction 실패 (phase=${phaseWhenAsked}, bot=${bot.id}):`, e);
+    console.error(
+      `[${room.roomId}] decideBotAction 실패 (phase=${phaseWhenAsked}, bot=${bot.id}):`,
+      e,
+    );
     return;
   }
   if (isStaleBotAction(room, phaseWhenAsked, turnWhenAsked)) return;
@@ -410,10 +371,7 @@ io.on('connection', (socket) => {
 
           markReady(room, meta.playerId);
 
-          if (
-            room.phase === 'lobby' &&
-            isEveryoneReady(room)
-          ) {
+          if (room.phase === 'lobby' && isEveryoneReady(room)) {
             assignRoles(room);
             const { category, word } = pickRandomCategoryAndWord();
             room.category = category;
@@ -502,12 +460,23 @@ io.on('connection', (socket) => {
           if (!room) throw new Error('room not found');
           if (room.phase !== 'survey') throw new Error('지금은 설문 단계가 아닙니다');
 
-          // TODO: DB 붙이면 여기서 실제 저장 (박진님 기능). 지금은 받기만 하고 버림.
+          room.surveys.push({
+            playerId: meta.playerId,
+            reasonIds: action.reasonIds,
+            freeText: action.freeText,
+            at: Date.now(),
+          });
           console.log(
-            `[${room.roomId}] 설문 수신 (${meta.playerId}):`,
+            `[${room.roomId}] 설문 수신 (${meta.playerId}) — ${room.surveys.length}번째`,
             action.reasonIds,
             action.freeText,
           );
+
+          // 사람 전원이 냈으면 더 기다릴 이유가 없다. 아래에서 방이 삭제될 수도 있으므로
+          // 제거보다 먼저 내보낸다.
+          if (room.surveys.length >= room.players.filter((p) => !p.isBot).length) {
+            exportGameLog(room);
+          }
 
           // 설문 제출 = 게임 완전히 끝. disconnect를 기다리지 않고 제출 시점에 바로
           // 방에서 제거한다 (emit 직후 프론트가 소켓을 끊는 타이밍에 기대는 것보다 안전).
@@ -544,9 +513,15 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (room.phase === 'survey') {
+    if (room.phase === 'survey' || room.phase === 'result') {
       // 게임이 완전히 끝난 뒤라 "중도 탈락 없음" 원칙과 무관. 다들 나가서
       // 방이 비면 정리해서 메모리에 안 남게 한다.
+      const humansLeft = room.players.filter((p) => !p.isBot && p.id !== meta.playerId).length;
+
+      // 설문을 아무도 안 내고 나가버리면 로그가 통째로 사라진다.
+      // 마지막 사람이 떠나는 순간이 마지막 기회다 (exportGameLog 는 중복 호출을 무시한다).
+      if (humansLeft === 0) exportGameLog(room);
+
       removePlayerFromLobby(meta.roomId, meta.playerId);
     }
     // 그 외(게임 진행 중)엔 기획서 원칙대로 그대로 둠 — 중도 탈락 없음

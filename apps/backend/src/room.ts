@@ -1,5 +1,13 @@
 import { InternalPlayer, Phase, Message, Role } from '@zeteo/shared-types';
 
+/** S7 설문 응답 한 건. 데이터 수집이 목적이라 방에 모아뒀다가 로그와 함께 내보낸다. */
+export interface SurveyResponse {
+  playerId: string;
+  reasonIds: number[];
+  freeText: string;
+  at: number;
+}
+
 export interface RoomInternalState {
   roomId: string;
   phase: Phase;
@@ -21,6 +29,8 @@ export interface RoomInternalState {
   lifeVoteDecided: boolean; // 생사투표 결과가 이미 확정돼서 3초 타이머가 걸린 상태인지
   createdAt: number;
   readyIds: Set<string>;
+  surveys: SurveyResponse[]; // S7 설문 응답. 사람마다 따로 도착하므로 모았다가 한 번에 내보낸다
+  exported: boolean; // 로그를 이미 내보냈는지. 마지막 사람이 나갈 때 중복 전송 방지
 }
 
 const rooms = new Map<string, RoomInternalState>();
@@ -47,6 +57,8 @@ export function createRoom(roomId: string): RoomInternalState {
     createdAt: Date.now(),
     readyIds: new Set(),
     lifeVoteDecided: false,
+    surveys: [],
+    exported: false,
   };
   rooms.set(roomId, room);
   return room;
