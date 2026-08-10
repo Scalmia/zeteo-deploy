@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import type { InternalPlayer } from '@zeteo/shared-types';
 import { RoomInternalState } from './room';
 import { tallyBotVoteResults } from './vote';
 
@@ -9,10 +10,19 @@ import { tallyBotVoteResults } from './vote';
 const LOG_DIR = process.env.LOG_DIR ?? path.join(__dirname, '../logs');
 const WEBHOOK_URL = process.env.LOG_WEBHOOK_URL;
 
+/**
+ * 로그가 기준으로 삼는 참가자 명단.
+ * 살아있는 room.players 는 설문을 낸 사람부터 하나씩 빠져나가므로,
+ * result 진입 때 찍어둔 사본이 있으면 그쪽을 쓴다.
+ */
+function rosterOf(room: RoomInternalState): InternalPlayer[] {
+  return room.finalPlayers ?? room.players;
+}
+
 /** 서버 전용 표기. isBot/role 은 클라이언트로 절대 안 나가지만 복기하려면 필요하다. */
 function describeSpeaker(room: RoomInternalState, id: string): string {
   if (id === 'system') return '[시스템]';
-  const p = room.players.find((pl) => pl.id === id);
+  const p = rosterOf(room).find((pl) => pl.id === id);
   if (!p) return id;
   const tags = [p.label, p.isBot ? '봇' : null, p.role === 'liar' ? '라이어' : null].filter(
     Boolean,
@@ -26,10 +36,11 @@ const escapeCell = (s: string) => s.replace(/\|/g, '\\|');
 
 /** 한 판 전체를 마크다운 한 장으로. 대화와 설문이 한 파일에 있어야 나중에 짝을 맞출 필요가 없다. */
 export function buildGameLog(room: RoomInternalState): string {
-  const bot = room.players.find((p) => p.isBot);
-  const liar = room.players.find((p) => p.role === 'liar');
+  const roster = rosterOf(room);
+  const bot = roster.find((p) => p.isBot);
+  const liar = roster.find((p) => p.role === 'liar');
   const hits = tallyBotVoteResults(room);
-  const humans = room.players.filter((p) => !p.isBot);
+  const humans = roster.filter((p) => !p.isBot);
   const hitCount = Object.values(hits).filter(Boolean).length;
 
   const lines: string[] = [
@@ -57,7 +68,7 @@ export function buildGameLog(room: RoomInternalState): string {
     '| 투표자 | 지목 | 적중 |',
     '|---|---|---|',
     ...Object.entries(room.botVotes).map(([voterId, targetId]) => {
-      const target = room.players.find((p) => p.id === targetId);
+      const target = roster.find((p) => p.id === targetId);
       return `| ${describeSpeaker(room, voterId)} | ${target?.label ?? targetId} | ${target?.isBot ? 'O' : 'X'} |`;
     }),
     '',
@@ -99,11 +110,12 @@ async function sendToWebhook(room: RoomInternalState, markdown: string): Promise
     return;
   }
 
-  const bot = room.players.find((p) => p.isBot);
+  const roster = rosterOf(room);
+  const bot = roster.find((p) => p.isBot);
   const hitCount = Object.values(tallyBotVoteResults(room)).filter(Boolean).length;
-  const humanCount = room.players.filter((p) => !p.isBot).length;
+  const humanCount = roster.filter((p) => !p.isBot).length;
   const summary = [
-    `**[${room.roomId}]** 종료 · ${room.players.length}인 · ${room.round}라운드`,
+    `**[${room.roomId}]** 종료 · ${roster.length}인 · ${room.round}라운드`,
     `주제 ${room.category} / 제시어 ${room.word}`,
     `봇 ${bot?.label ?? '?'} · 결과 ${room.liarGameResult ?? '미확정'} · 봇 적중 ${hitCount}/${humanCount} · 설문 ${room.surveys.length}건`,
   ].join('\n');

@@ -100,6 +100,12 @@ function advancePhase(room: RoomInternalState) {
     room.currentTurnIndex = 0;
   }
 
+  // 로그용 명단 사본. 설문을 낸 사람은 즉시 방에서 빠지는데 로그는 전원이 낸
+  // 뒤에 만들어지므로, 여기서 찍어두지 않으면 먼저 나간 사람이 이름 없이 남는다.
+  if (room.phase === 'result' && room.finalPlayers === null) {
+    room.finalPlayers = room.players.map((p) => ({ ...p }));
+  }
+
   enterPhase(room);
   broadcastRoom(room.roomId);
 }

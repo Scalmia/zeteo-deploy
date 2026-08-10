@@ -31,6 +31,10 @@ export interface RoomInternalState {
   readyIds: Set<string>;
   surveys: SurveyResponse[]; // S7 설문 응답. 사람마다 따로 도착하므로 모았다가 한 번에 내보낸다
   exported: boolean; // 로그를 이미 내보냈는지. 마지막 사람이 나갈 때 중복 전송 방지
+  // result 진입 시점의 참가자 명단 사본. 설문을 제출한 사람은 그 즉시 방에서
+  // 제거되는데, 로그는 마지막 사람이 제출한 뒤에야 만들어진다. 그래서 살아있는
+  // players 를 보면 먼저 나간 사람들이 이미 없어서 이름·역할·인원수가 전부 어긋난다.
+  finalPlayers: InternalPlayer[] | null;
 }
 
 const rooms = new Map<string, RoomInternalState>();
@@ -59,6 +63,7 @@ export function createRoom(roomId: string): RoomInternalState {
     lifeVoteDecided: false,
     surveys: [],
     exported: false,
+    finalPlayers: null,
   };
   rooms.set(roomId, room);
   return room;
