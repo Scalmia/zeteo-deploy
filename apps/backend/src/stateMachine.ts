@@ -17,22 +17,30 @@ const transitions: Record<Phase, Transition> = {
   debate: (room) => {
     const { accusedId, tie } = tallyDebateVotes(room);
 
-    if (tie) {
+    // 무투표를 동점과 같이 다룬다.
+    //
+    // 원래는 무지목이면 "라이어 승"을 예약하고 곧장 botVote 로 보냈다. 그 규칙은 토론이
+    // 120초일 때 성립했다 — 2분을 다 쓰고도 아무도 지목하지 않았다면 그건 참가자들의
+    // 판단이라고 볼 수 있었다. 토론을 60초로 줄인 뒤로는 같은 상태가 "아직 못 했다"를
+    // 뜻하게 됐는데, 코드가 그 둘을 구분할 방법이 없다(둘 다 votes 가 비어 있을 뿐이다).
+    // 구분할 수 없으면 판을 끝내버리는 쪽보다 한 번 더 돌리는 쪽이 덜 틀린다.
+    //
+    // 봇이 제한시간 안에 표를 못 던지는 경우도 여기서 같이 걷힌다 — 봇은 매 사이클
+    // 확률로 발언과 투표 중 하나를 고르므로(bot/index.ts) 시간이 짧으면 기권으로 끝날 수
+    // 있는데, 그 판이 라이어 승으로 처리되지 않는다.
+    if (tie || !accusedId) {
       room.round += 1;
       room.votes = {};
       pushSystemMessage(room, '동점입니다. 재투표를 시작합니다.');
-      console.log(`[${room.roomId}] 동점 발생 → 전원 재투표 (round ${room.round})`);
+      // 화면 문구는 같아도 로그는 갈라둔다 — 표가 갈린 것과 아예 안 들어온 것은
+      // 원인이 달라서, 재투표가 잦을 때 어느 쪽인지 알아야 손볼 곳을 찾는다.
+      console.log(
+        `[${room.roomId}] ${tie ? '동점 발생' : '무투표'} → 전원 재투표 (round ${room.round})`,
+      );
       return 'debate';
     }
 
     room.accusedId = accusedId;
-
-    if (!accusedId) {
-      // 아무도 지목 안 됨 → 라이어 승. 스포일러 방지를 위해 실제 liarGameResult는
-      // result 진입 직전(botVote → result 전이)에만 채운다 — 여기선 예약만 해둔다.
-      room.pendingLiarGameResult = 'liarWin';
-      return 'botVote';
-    }
 
     const accused = room.players.find((p) => p.id === accusedId);
     pushSystemMessage(room, `${accused?.label ?? '누군가'}님이 최다 득표로 지목되었습니다.`);
